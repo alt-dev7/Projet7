@@ -221,8 +221,8 @@ Le job `publish` construit en parallèle les cibles `back` et `front` du [`Docke
 
 | Image | Tags |
 |---|---|
-| `ghcr.io/alt-dev7/orion-microcrm-back` | `latest`, `sha-<commit>` |
-| `ghcr.io/alt-dev7/orion-microcrm-front` | `latest`, `sha-<commit>` |
+| `ghcr.io/alt-dev7/orion-microcrm-back` | `latest`, `sha-<commit>`, `X.Y.Z` (releases) |
+| `ghcr.io/alt-dev7/orion-microcrm-front` | `latest`, `sha-<commit>`, `X.Y.Z` (releases) |
 
 ### Choix techniques
 
@@ -281,3 +281,69 @@ Procédure de reprise :
 
 - Les paquets sont privés à leur première publication : les rendre publics (ou les lier au dépôt) dans les réglages du paquet sur GitHub si nécessaire.
 - `workflow_run` utilise la version de `cd.yml` présente sur `main` : une modification du workflow n'a d'effet qu'une fois fusionnée.
+
+## Releases
+
+Le workflow [`.github/workflows/release.yml`](.github/workflows/release.yml) crée les releases GitHub avec [semantic-release](https://github.com/semantic-release/semantic-release). Comme le CD, il se déclenche à la fin du workflow `CI` et ne s'exécute que si la CI a réussi sur un `push` vers `main`. Le JAR et le build Angular sont ceux produits et testés par la CI (artefacts `jar` et `front-dist`) : rien n'est reconstruit.
+
+Le workflow vérifie d'abord que l'application démarre depuis ces artefacts (le JAR répond sur `/persons`, le build Angular est servi), puis semantic-release analyse les commits depuis la dernière release. S'il en déduit une nouvelle version, il crée le tag `vX.Y.Z` et la release avec ses notes, puis le workflow y joint :
+
+| Artefact | Contenu |
+|---|---|
+| `microcrm-X.Y.Z.jar` | JAR Spring Boot exécutable (`java -jar`) |
+| `microcrm-front-X.Y.Z.tar.gz` | Build Angular optimisé (fichiers statiques uniquement) |
+
+Les images GHCR `orion-microcrm-back` et `orion-microcrm-front` reçoivent aussi le tag `X.Y.Z` : c'est l'image `sha-<commit>` publiée par le CD, déjà analysée, simplement re-étiquetée (le workflow attend sa publication si besoin).
+
+### Politique de versioning
+
+[SemVer](https://semver.org/lang/fr/) (`MAJOR.MINOR.PATCH`), déduit des titres de commit au format Conventional Commits :
+
+| Titre de commit | Version |
+|---|---|
+| `fix: …` | PATCH |
+| `feat: …` | MINOR |
+| `feat!: …` ou `BREAKING CHANGE:` dans le corps | MAJOR |
+| `docs:`, `ci:`, `chore:`… | aucune release |
+
+`main` est protégée : les changements passent par une PR fusionnée en squash, dont le titre (au format ci-dessus) devient le commit analysé. Sans tag existant, la première release est `1.0.0`.
+
+### Choix techniques
+
+- **Pas de release candidate par commit** : chaque commit utile sur `main` produit une version stable, déjà validée par la CI.
+- **Pas d'action manuelle** : la fusion de la PR suffit, l'humain décide de la version en choisissant le type du titre. Aucun tag n'est posé à la main.
+- **Pas de branche par release** : une seule branche `main`, les versions sont des tags.
+- **Changelog dans les notes de release** : semantic-release ne pousse que le tag, ce qui reste possible sur une branche protégée ; un `CHANGELOG.md` commité exigerait de contourner la protection.
+- **Workflow séparé du CI** : les droits d'écriture (`contents: write`) sont limités à ce job, et la CI reste en lecture seule sur les PR.
+- **Pas de fichier de configuration** : semantic-release est lancé avec ses options en ligne de commande (`--branches`, `--plugins`) ; seuls l'analyse des commits, les notes et la publication GitHub sont activés, sans npm.
+- **Artefacts sans fichier sensible** : seuls le JAR et le dossier `dist` du build y sont placés, jamais le code source ni les secrets.
+
+### Commandes
+
+| Commande | Objectif | Définie dans | Exécutée |
+|---|---|---|---|
+| `actions/download-artifact` (`run-id`) | Récupérer le JAR et le build front de la CI | `release.yml` | Release, après une CI réussie sur `main` |
+| `java -jar` puis `curl /persons` | Vérifier que le JAR démarre et répond | `release.yml` | Release |
+| `python3 -m http.server` puis `curl` | Vérifier que le build Angular est servi | `release.yml` | Release |
+| `semantic-release` | Calculer la version, créer le tag, la release et ses notes | `release.yml` | Release |
+| `gh release upload` | Joindre le JAR et l'archive front à la release | `release.yml` | Release, si une version a été créée |
+| `docker buildx imagetools create` | Ajouter le tag `X.Y.Z` à l'image `sha-<commit>` sans la reconstruire | `release.yml` | Release, si une version a été créée |
+
+### Release « test »
+
+Avant la première vraie release, simuler sur le dépôt local pour voir la version calculée sans rien publier :
+
+```shell
+GITHUB_TOKEN=<jeton> npx -p semantic-release@24 semantic-release --dry-run --no-ci --branches main \
+  --plugins @semantic-release/commit-analyzer @semantic-release/release-notes-generator
+```
+
+### Risques et reprise
+
+| Risque | Parade |
+|---|---|
+| Version erronée (mauvais type de commit) | Ne jamais réécrire un tag publié : corriger par un nouveau commit `fix:` ou `feat:` |
+| Release créée sans artefacts (échec de l'ajout) | Relancer le workflow `Release` (onglet *Actions*) après avoir supprimé la release et son tag |
+| Artefact défectueux | Le JAR et le front viennent d'une CI verte et sont démarrés avant publication ; en cas de souci, reprendre la version précédente depuis la page *Releases* |
+
+Les versions des actions et de semantic-release (`@24`) sont à revoir régulièrement.

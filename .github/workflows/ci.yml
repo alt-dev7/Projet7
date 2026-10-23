@@ -39,6 +39,12 @@ jobs:
           files: back/build/test-results/test/*.xml
           check_name: Tests back
           comment_mode: off
+      - name: Archiver le JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: jar
+          path: back/build/libs/microcrm-0.0.1-SNAPSHOT.jar
+          retention-days: 14
       - name: Archiver les rapports
         if: always()
         uses: actions/upload-artifact@v4
@@ -80,6 +86,12 @@ jobs:
           files: front/test-results/junit.xml
           check_name: Tests front
           comment_mode: off
+      - name: Archiver le build
+        uses: actions/upload-artifact@v4
+        with:
+          name: front-dist
+          path: front/dist/microcrm/browser
+          retention-days: 14
       - name: Archiver les rapports
         if: always()
         uses: actions/upload-artifact@v4
