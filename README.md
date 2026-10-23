@@ -212,3 +212,72 @@ cd front && npm ci && npm test -- --watch=false --browsers=ChromeHeadlessNoSandb
 ```
 
 Les rapports sont écrits dans `back/build/reports/` et `front/test-results/`, `front/coverage/`.
+
+## Déploiement continu
+
+Le workflow [`.github/workflows/cd.yml`](.github/workflows/cd.yml) publie les images Docker sur le registre GitHub (GHCR). Il se déclenche à la fin du workflow `CI` (`workflow_run`) et ne s'exécute que si la CI a réussi sur un `push` vers `main` : jamais pour une PR, une exécution planifiée ou une CI en échec. Le commit publié est celui que la CI a validé (`head_sha`).
+
+Le job `publish` construit en parallèle les cibles `back` et `front` du [`Dockerfile`](Dockerfile), analyse chaque image avec Trivy (vulnérabilités HIGH et CRITICAL, affichées dans les logs) puis la pousse :
+
+| Image | Tags |
+|---|---|
+| `ghcr.io/alt-dev7/orion-microcrm-back` | `latest`, `sha-<commit>` |
+| `ghcr.io/alt-dev7/orion-microcrm-front` | `latest`, `sha-<commit>` |
+
+### Choix techniques
+
+- **GHCR** : registre intégré à GitHub, authentifié par le `GITHUB_TOKEN` du workflow. Aucun compte ni secret supplémentaire, contrairement à Docker Hub.
+- **Workflow séparé du CI** : le CD ne dépend que du résultat de la CI et se lit à part. Un commit dont les tests échouent n'est jamais publié.
+- **Matrice `back` / `front`** : une seule définition d'étapes pour les deux images, construites en parallèle.
+- **Deux tags** : `latest` pour la dernière version, `sha-<commit>` pour une version précise, qui permet de revenir en arrière.
+- **Trivy sans blocage** (`--exit-code 0`) : le back embarque des vulnérabilités critiques liées à Spring Boot 3.2.5 en fin de vie, qui ne se corrigent pas en changeant d'image. Bloquer la publication l'interromprait en permanence ; le rapport est lu dans les logs et la montée de version relève du plan de dette technique. Le seuil pourra devenir bloquant après cette montée.
+- **Cache de build** (`type=gha`) : réutilise les couches Docker d'une publication à l'autre, avec un cache distinct par image.
+- **Pas de déploiement sur un serveur** : l'URL de l'API est écrite en dur dans le front (`http://localhost:8080`), l'application ne fonctionne que sur la machine qui publie les ports. La publication des images est donc l'étape de déploiement automatisée.
+
+### Commandes
+
+| Commande | Objectif | Définie dans | Exécutée |
+|---|---|---|---|
+| `docker/login-action` | S'authentifier sur GHCR | `cd.yml` | CD, après une CI réussie sur `main` |
+| `docker/metadata-action` | Calculer le nom de l'image et ses tags | `cd.yml` | CD |
+| `docker/setup-buildx-action` | Installer Buildx, nécessaire au cache de build | `cd.yml` | CD |
+| `docker/build-push-action` (`target: back` / `front`) | Construire chaque image, puis la publier une fois analysée | `cd.yml`, `Dockerfile` | CD |
+| `docker run aquasec/trivy … image` | Lister les vulnérabilités de l'image avant publication | `cd.yml` (même commande qu'en local) | CD |
+| `docker compose up --build` | Construire et lancer l'application | `docker-compose.yml` | Local |
+| `docker pull ghcr.io/alt-dev7/orion-microcrm-back:latest` | Récupérer une image publiée | — | Local, après publication |
+| `docker run -p 8080:8080 …:sha-<commit>` | Lancer une version précise (reprise) | — | Local ou serveur, en cas de retour arrière |
+
+### Lancer l'application depuis les images publiées
+
+```shell
+docker run -d --name back -p 8080:8080 ghcr.io/alt-dev7/orion-microcrm-back:latest
+docker run -d --name front -p 80:80 ghcr.io/alt-dev7/orion-microcrm-front:latest
+```
+
+L'application est disponible sur http://localhost. `docker rm -f back front` arrête et supprime les conteneurs.
+
+### Sécurité
+
+Le workflow s'authentifie avec le `GITHUB_TOKEN` fourni par GitHub, éphémère : aucun secret n'est à créer. La permission `packages: write` est limitée au job `publish`, et aucun secret n'est copié dans les images.
+
+### Risques et procédure de reprise
+
+| Risque | Parade |
+|---|---|
+| Image défectueuse publiée | Le CD ne part qu'après des tests verts ; reprise avec le tag `sha-<commit>` précédent (ci-dessous) |
+| Publication interrompue ou en échec | `latest` n'est mise à jour qu'à la fin du push : relancer le workflow `CD` depuis l'onglet *Actions* |
+| Vulnérabilité dans une image de base | Rapport Trivy dans les logs du CD ; reconstruire l'image (nouveau push sur `main`) |
+| Perte des données | La base HSQLDB est en mémoire et rechargée avec les données initiales à chaque démarrage : rien à restaurer à ce stade |
+
+Procédure de reprise :
+
+1. Identifier le dernier commit sain (onglet *Actions* ou `git log`).
+2. Arrêter la version défectueuse : `docker rm -f back front`.
+3. Relancer les deux images avec le tag `sha-<commit>` de ce commit à la place de `latest`.
+4. Vérifier que les conteneurs passent en `healthy` (`docker ps`) et que http://localhost répond.
+5. Corriger sur `main` : le CD republie ensuite `latest`.
+
+### Configuration
+
+- Les paquets sont privés à leur première publication : les rendre publics (ou les lier au dépôt) dans les réglages du paquet sur GitHub si nécessaire.
+- `workflow_run` utilise la version de `cd.yml` présente sur `main` : une modification du workflow n'a d'effet qu'une fois fusionnée.
