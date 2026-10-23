@@ -1,57 +1,53 @@
-FROM node as front-build
-
-COPY ./front /src
+FROM node:22-alpine AS front-build
 
 WORKDIR /src
 
-RUN npm ci \
-    && npx @angular/cli build --optimization
+COPY front/package.json front/package-lock.json ./
+RUN npm ci
 
-FROM gradle:jdk17 as back-build
+COPY front ./
+RUN npx ng build --optimization
 
-COPY ./back /src
+FROM gradle:8.7-jdk17 AS back-build
 
 WORKDIR /src
 
-RUN ./gradlew build
+COPY back ./
+RUN gradle bootJar --no-daemon
 
-FROM alpine:3.19 as front
+FROM eclipse-temurin:21-jre-alpine AS back
 
-COPY --from=front-build /src/dist/microcrm/browser /app/front
-COPY misc/docker/Caddyfile /app/Caddyfile
-
-RUN apk add caddy
+RUN addgroup -S app && adduser -S -G app app
 
 WORKDIR /app
+
+COPY --from=back-build /src/build/libs/microcrm-0.0.1-SNAPSHOT.jar back/microcrm.jar
+
+USER app
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
+
+CMD ["java", "-jar", "/app/back/microcrm.jar"]
+
+FROM caddy:2-alpine AS front
+
+RUN addgroup -S app && adduser -S -G app app
+
+WORKDIR /app
+
+COPY --from=front-build /src/dist/microcrm/browser front
+COPY misc/docker/Caddyfile Caddyfile
+
+USER app
+
+ENV XDG_CONFIG_HOME=/tmp XDG_DATA_HOME=/tmp
 
 EXPOSE 80
-EXPOSE 443
 
-CMD ["/usr/sbin/caddy", "run"]
+HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1/ || exit 1
 
-FROM alpine:3.19 as back
-
-COPY --from=back-build /src/build/libs/microcrm-0.0.1-SNAPSHOT.jar /app/back/microcrm-0.0.1-SNAPSHOT.jar
-
-RUN apk add openjdk21-jre-headless
-
-WORKDIR /app
-
-EXPOSE 4200
-
-CMD ["java", "-jar", "/app/back/microcrm-0.0.1-SNAPSHOT.jar"]
-
-FROM alpine:3.19 as standalone
-
-COPY --from=front / /
-COPY --from=back / /
-COPY misc/docker/supervisor.ini /app/supervisor.ini
-
-RUN apk add supervisor
-
-WORKDIR /app
-
-CMD ["/usr/bin/supervisord", "-c", "/app/supervisor.ini"]
-
-
-
+CMD ["caddy", "run", "--config", "/app/Caddyfile", "--adapter", "caddyfile"]

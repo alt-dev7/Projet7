@@ -1,0 +1,21 @@
+services:
+  back:
+    build:
+      context: .
+      target: back
+    image: orion-microcrm-back:latest
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  front:
+    build:
+      context: .
+      target: front
+    image: orion-microcrm-front:latest
+    ports:
+      - "80:80"
+    depends_on:
+      back:
+        condition: service_healthy
+    restart: unless-stopped

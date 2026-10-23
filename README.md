@@ -108,51 +108,57 @@ cd back
 
 ### Images Docker
 
-#### Client
+Un seul [`Dockerfile`](Dockerfile) multi-étapes produit les images de l'application.
 
-##### Construire l'image
+| Cible | Contenu | Port |
+|---|---|---|
+| `front` | Fichiers statiques Angular servis par Caddy | 80 |
+| `back` | JAR Spring Boot sur JRE 21 | 8080 |
+
+#### Avec Docker Compose (recommandé)
 
 ```shell
-docker build --target front -t orion-microcrm-front:latest .
+docker compose up --build
 ```
 
-##### Exécuter l'image
+L'application est disponible sur http://localhost et l'API sur http://localhost:8080. Le service `front` démarre une fois le `back` déclaré sain par son healthcheck. `docker compose down` arrête et supprime les conteneurs.
 
-```shell
-docker run -it --rm -p 80:80 -p 443:443 orion-microcrm-front:latest
-```
+L'URL de l'API est écrite en dur dans le front (`http://localhost:8080`) : l'application fonctionne donc sur la machine qui publie les ports 80 et 8080, pas derrière un autre nom d'hôte. La base HSQLDB est en mémoire : les données sont réinitialisées à chaque démarrage.
 
-L'application sera disponible sur https://localhost.
-
-#### Serveur
-
-##### Construire l'image
+#### Sans Docker Compose
 
 ```shell
 docker build --target back -t orion-microcrm-back:latest .
-```
-
-##### Exécuter l'image
-
-```shell
 docker run -it --rm -p 8080:8080 orion-microcrm-back:latest
+
+docker build --target front -t orion-microcrm-front:latest .
+docker run -it --rm -p 80:80 orion-microcrm-front:latest
 ```
 
-L'API sera disponible sur http://localhost:8080.
+#### Choix techniques
 
-#### Tout en un
+- **Images de base officielles et versionnées** : `node:22-alpine` (même version que la CI), `gradle:8.7-jdk17` (version du wrapper, JDK 17 de la compilation), `eclipse-temurin:21-jre-alpine` (distribution OpenJDK de l'Eclipse Foundation) et `caddy:2-alpine` (image officielle de Caddy). Les images sans tag précis de l'ancien Dockerfile (`node`, `gradle:jdk17`) sont abandonnées.
+- **Images légères** : variantes Alpine, JRE seul à l'exécution (ni JDK, ni Gradle, ni Node). Les étapes de build ne sont pas livrées. Taille mesurée : front 25 Mo, back 117 Mo (contenu compressé).
+- **Build reproductible et rapide** : `npm ci` et la compilation Gradle sont séparés de la copie des sources pour profiter du cache ; les tests ne sont pas rejoués dans l'image, ils le sont par la CI. Le [`.dockerignore`](.dockerignore) exclut `.git`, les dépendances et les sorties de build.
+- **Sécurité** : exécution sous un utilisateur non privilégié, aucun secret ni variable sensible dans les images, HTTPS désactivé dans Caddy (pas de domaine ni de certificat en local : à terminer au niveau d'un reverse proxy en production), healthchecks sur les deux services.
+- **Maintenance** : les tags sont à faire évoluer à la main (changement de version de Node dans la CI, du wrapper Gradle ou de Java) ; après chaque modification, `docker compose up --build` doit repasser en `healthy`, et le scan Trivy est à relancer pour contrôler les nouvelles vulnérabilités.
+- **Corrections par rapport à l'ancien Dockerfile** : port exposé du back (8080 et non 4200), alignement des versions de Java, Caddy installé depuis son image officielle plutôt que par `apk` au démarrage, suppression de la cible `standalone` (hors besoin : Compose orchestre un conteneur par service).
+
+#### Analyse des images
+
+Les images ont été scannées avec [Trivy](https://trivy.dev/), outil libre qui remplit le même rôle que Twistlock :
 
 ```shell
-docker build --target standalone -t orion-microcrm-standalone:latest .
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest \
+  image --severity HIGH,CRITICAL orion-microcrm-back:latest
 ```
 
-##### Exécuter l'image
+| Image | Système (Alpine) | Dépendances applicatives |
+|---|---|---|
+| `back` | 0 vulnérabilité | 39 (8 critiques) dans le JAR : Spring Boot 3.2.5, Tomcat, Jackson |
+| `front` | 0 vulnérabilité | 5 (HIGH) dans le binaire Caddy (Go) |
 
-```shell
-docker run -it --rm -p 8080:8080 -p 80:80 -p 443:443 orion-microcrm-standalone:latest
-```
-
-L'application sera disponible sur https://localhost et l'API sur http://localhost:8080.
+Les vulnérabilités du back viennent des versions de Spring Boot en fin de vie et ne se corrigent pas en changeant d'image : elles relèvent de la montée de version. Celles de Caddy seront corrigées par une nouvelle image `caddy:2-alpine` : il suffit de reconstruire l'image.
 
 ## Intégration continue
 
@@ -163,7 +169,8 @@ Le workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (GitHub Actio
 | `back` | JDK 17 (Temurin), `./gradlew build` (compilation, tests JUnit, rapport de couverture JaCoCo) |
 | `front` | Node 22, `npm ci`, `ng build --optimization`, tests Karma en Chrome headless avec couverture |
 | `sonar` | Après `back` et `front` : analyse SonarQube Cloud avec les rapports de couverture ; le Quality Gate est consulté sur le tableau de bord mais ne bloque pas la CI |
-| `audit` | Planifié ou manuel uniquement : `npm audit --audit-level=high` |
+| `compose` | Après `back` et `front` : `docker compose up --build --wait`, puis vérification que l'API (`/persons`) et le front répondent |
+| `audit` | Planifié ou manuel uniquement : analyse Trivy du JAR (dépendances Gradle, rapport sans blocage) puis `npm audit --audit-level=high` |
 
 `back` et `front` tournent en parallèle. Les résultats des tests apparaissent dans les *checks* du commit ou de la PR (« Tests back », « Tests front »), et les rapports complets (JUnit XML, HTML, couverture) sont conservés 14 jours en artefacts. Le projet utilise Gradle, pas Maven.
 

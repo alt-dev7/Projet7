@@ -1,5 +1,15 @@
+.git
+.github
+docs
+misc/screenshots
+*.md
+*.pdf
+*.odt
+**/node_modules
 /back/.gradle
 /back/build
+/back/bin
 /front/dist
-/front/node_modules
 /front/.angular
+/front/coverage
+/front/test-results
