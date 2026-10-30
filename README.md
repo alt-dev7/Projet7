@@ -347,3 +347,61 @@ GITHUB_TOKEN=<jeton> npx -p semantic-release@24 semantic-release --dry-run --no-
 | Artefact défectueux | Le JAR et le front viennent d'une CI verte et sont démarrés avant publication ; en cas de souci, reprendre la version précédente depuis la page *Releases* |
 
 Les versions des actions et de semantic-release (`@24`) sont à revoir régulièrement.
+
+## Monitoring
+
+Une stack locale centralise les logs de l'application et les affiche dans un tableau de bord. Elle est séparée de l'application et n'est pas lancée par la CI/CD, car elle est trop lourde pour ça.
+
+```
+back (JSON) ─┐
+             ├─ pilote Docker GELF ─> Logstash ─> Elasticsearch ─> Kibana
+front (JSON) ┘
+```
+
+| Service | Rôle | Accès local |
+|---|---|---|
+| `logstash` | Reçoit les logs, les met au même format, écarte les healthchecks | `udp://127.0.0.1:5044` |
+| `elasticsearch` | Stocke et indexe les logs (`microcrm-logs-AAAA.MM.JJ`) | http://localhost:9200 |
+| `kibana` | Affiche le tableau de bord | http://localhost:5601 |
+| `kibana-setup` | Importe le tableau de bord dans Kibana, puis s'arrête | aucun |
+
+### Commandes
+
+```shell
+docker compose -f docker-compose-elk.yml up -d
+docker compose up --build -d
+```
+
+Le tableau de bord est sur http://localhost:5601/app/dashboards#/view/microcrm. Logstash met environ une minute à démarrer : attendre qu'il soit prêt avant de lancer l'application pour ne pas perdre les logs de démarrage.
+
+`docker compose -f docker-compose-elk.yml down` arrête la stack ; ajouter `-v` supprime aussi les logs stockés.
+
+### Choix techniques
+
+- **Kibana** : visualisation native de la stack ELK. Le tableau de bord est un export Kibana versionné ([`misc/elk/kibana/dashboard.ndjson`](misc/elk/kibana/dashboard.ndjson)), réimporté à chaque démarrage. Pour le modifier : l'éditer dans Kibana, puis remplacer ce fichier par un nouvel export (*Stack Management > Saved Objects*).
+- **Pilote Docker GELF** : même chemin pour le back et le front, sans conteneur de collecte en plus. `docker compose logs` reste disponible.
+- **Back** : logs JSON avec `logstash-logback-encoder`, y compris en développement. Les logs d'accès de Tomcat, activés par configuration dans `application.properties`, ajoutent une ligne JSON par requête (méthode, chemin, statut, durée).
+- **Front** : logs d'accès de Caddy en JSON, dont Logstash garde le niveau et le statut, mais pas la requête.
+- **Niveaux** : les logs d'accès étant écrits en `INFO`, Logstash passe en `ERROR` ceux dont le statut est 5xx.
+- **Données personnelles** : ni query string ni adresse IP ne sont conservées, car `findByEmail` transporte un email dans l'URL.
+- **Mémoire** : conteneurs plafonnés à 2 Go pour Elasticsearch, 1 Go pour Logstash et 1 Go pour Kibana, soit 4 Go au maximum, avec une heap de 1 Go pour Elasticsearch et de 512 Mo pour Logstash. La stack consomme environ 3 Go une fois démarrée.
+- **Versions** : Elasticsearch, Logstash et Kibana 8.19.23.
+
+### Tableau de bord
+
+| Panneau | Ce qu'il montre |
+|---|---|
+| Nombre total de logs | Volume sur la période |
+| Erreurs | Logs de niveau `ERROR` et réponses HTTP 5xx |
+| Volume de logs par service | Fréquence et pics d'activité, back et front |
+| Logs par niveau | Tendance `INFO`, `WARN`, `ERROR` |
+| Temps de réponse du back (p95) | Performances de l'API |
+
+### Limites
+
+- Configuration réservée à un poste local : sécurité Elasticsearch désactivée, donc Kibana sans authentification, ports limités à `127.0.0.1`.
+- Les erreurs JavaScript du navigateur ne sont pas collectées : côté front, seuls les accès HTTP le sont. Les collecter demanderait un point d'entrée public supplémentaire pour recevoir ces logs.
+- Le front renvoie `index.html` pour toute URL inconnue : une ressource manquante y apparaît en 200, pas en 404.
+- GELF passe par UDP : les logs émis quand Logstash est arrêté sont perdus, mais l'application continue de fonctionner.
+- Seuls les conteneurs lancés avec `docker-compose.yml` envoient leurs logs, pas ceux lancés avec `docker run`.
+- Aucune rétention n'est configurée : les index s'accumulent jusqu'à leur suppression avec `down -v`.
