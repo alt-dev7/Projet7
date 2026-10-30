@@ -156,9 +156,9 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:lates
 | Image | Système (Alpine) | Dépendances applicatives |
 |---|---|---|
 | `back` | 0 vulnérabilité | 39 (8 critiques) dans le JAR : Spring Boot 3.2.5, Tomcat, Jackson |
-| `front` | 0 vulnérabilité | 5 (HIGH) dans le binaire Caddy (Go) |
+| `front` | 3 (1 critique) | 7 (HIGH) dans le binaire Caddy (Go) |
 
-Les vulnérabilités du back viennent des versions de Spring Boot en fin de vie et ne se corrigent pas en changeant d'image : elles relèvent de la montée de version. Celles de Caddy seront corrigées par une nouvelle image `caddy:2-alpine` : il suffit de reconstruire l'image.
+Relevé du 30/10/2026, sur le dernier déploiement. Les vulnérabilités du back viennent des versions de Spring Boot en fin de vie et ne se corrigent pas en changeant d'image : elles relèvent de la montée de version. Celles du front viennent de l'image `caddy:2-alpine` : elles sont à recontrôler à chaque reconstruction, car leur nombre dépend de la dernière image publiée.
 
 ## Intégration continue
 
@@ -177,7 +177,7 @@ Le workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (GitHub Actio
 ### Choix techniques
 
 - **Jobs `back` et `front` indépendants et parallèles** : les deux suites n'ont pas de dépendance entre elles, et un échec d'un côté n'est pas masqué par l'autre.
-- **Quality Gate non bloquant** (`sonar.qualitygate.wait=false`) : le code d'origine ne passe pas le gate par défaut (bugs, une vulnérabilité mineure, couverture insuffisante). Les corriger n'entre pas dans le périmètre du pipeline ; l'analyse reste publiée à chaque exécution et ses résultats alimentent le plan de sécurité et le suivi de la dette technique. Le gate pourra redevenir bloquant une fois ces points traités.
+- **Quality Gate non bloquant** (`sonar.qualitygate.wait=false`) : le gate réussit aujourd'hui, mais il ne contrôle que le code nouveau. Il ne dit rien de la dette du code d'origine (20 bugs, une vulnérabilité mineure, 59,8 % de couverture), dont la correction n'entre pas dans le périmètre du pipeline. L'analyse reste publiée à chaque exécution et ses résultats alimentent le plan de sécurité et le suivi de la dette technique. Le gate pourra devenir bloquant une fois ces points traités.
 - **`sonar` après `back` et `front`** : il réutilise leurs rapports de couverture (artefacts) au lieu de rejouer les tests, et `fetch-depth: 0` donne à Sonar l'historique Git pour détecter le code nouveau.
 - **JDK 17 (Temurin)** : version de compilation du projet (`build.gradle`), la même que dans le Dockerfile. **Node 22** : même version que l'image `node:22-alpine`.
 - **Cache npm et Gradle** (`setup-node`, `setup-gradle`) : accélère les runs sans changer leur résultat ; `npm ci` et le wrapper Gradle garantissent des versions identiques à celles du dépôt.
@@ -193,7 +193,7 @@ Le workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (GitHub Actio
 | `npm ci` | Installer les dépendances du front aux versions verrouillées | `front/package-lock.json` | CI (jobs `front`, `audit`), local |
 | `npx ng build --optimization` | Compiler le front | `front/angular.json` | CI (job `front`) |
 | `npm test -- --watch=false --browsers=ChromeHeadlessNoSandbox --code-coverage` | Lancer les tests Karma en Chrome headless avec couverture | script `test` de `front/package.json`, `front/karma.conf.js` | CI (job `front`), local |
-| `SonarSource/sonarqube-scan-action` | Analyser le code et la couverture, attendre le Quality Gate | `ci.yml`, `sonar-project.properties` | CI (job `sonar`) |
+| `SonarSource/sonarqube-scan-action` | Analyser le code et la couverture, sans attendre le Quality Gate | `ci.yml`, `sonar-project.properties` | CI (job `sonar`) |
 | `npm audit --audit-level=high` | Signaler les dépendances npm vulnérables | `ci.yml` | CI planifiée ou manuelle (job `audit`) |
 
 ### Configuration requise
@@ -403,5 +403,5 @@ Le tableau de bord est sur http://localhost:5601/app/dashboards#/view/microcrm. 
 - Les erreurs JavaScript du navigateur ne sont pas collectées : côté front, seuls les accès HTTP le sont. Les collecter demanderait un point d'entrée public supplémentaire pour recevoir ces logs.
 - Le front renvoie `index.html` pour toute URL inconnue : une ressource manquante y apparaît en 200, pas en 404.
 - GELF passe par UDP : les logs émis quand Logstash est arrêté sont perdus, mais l'application continue de fonctionner.
-- Seuls les conteneurs lancés avec `docker-compose.yml` envoient leurs logs, pas ceux lancés avec `docker run`.
+- Les conteneurs lancés avec `docker-compose.yml` envoient leurs logs. Ceux lancés avec `docker run` ne le font que si on ajoute les options `--log-driver gelf --log-opt gelf-address=udp://127.0.0.1:5044 --log-opt tag=back` (ou `tag=front`).
 - Aucune rétention n'est configurée : les index s'accumulent jusqu'à leur suppression avec `down -v`.
